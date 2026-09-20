@@ -140,6 +140,18 @@
           <div id="pqConstraints" class="assign-list"></div>
           <button id="btnPqAddConstraint" class="btn btn-small">＋ 添加约束</button>
         </div>
+        <div class="field">
+          <span>有序必经选项（路径必须按 1→N 的顺序依次经过）</span>
+          <div id="pqRequired" class="pq-waylist"></div>
+          <select id="pqRequiredPick" class="pq-waypick"></select>
+          <button id="btnPqAddRequired" class="btn btn-small">＋ 添加必经选项</button>
+        </div>
+        <div class="field">
+          <span>禁用选项（路径中不允许出现这些选项）</span>
+          <div id="pqForbidden" class="pq-waylist"></div>
+          <select id="pqForbiddenPick" class="pq-waypick"></select>
+          <button id="btnPqAddForbidden" class="btn btn-small">＋ 添加禁用选项</button>
+        </div>
         <div id="pqStale" class="diff-stale" hidden>⚠ 剧情或查询条件已修改，以下结果可能过期，请重新「查询路径」</div>
         <div id="pqResult" class="pq-result"></div>
       </section>

@@ -208,7 +208,21 @@ code {
 .analysis-card > .issue-list { overflow: auto; }
 
 /* ---------- 目标路径查询 ---------- */
-.query-card { max-height: 44%; display: flex; flex-direction: column; }
+.query-card { max-height: 52%; display: flex; flex-direction: column; }
+.query-card .pq-result { overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.pq-waylist { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; }
+.pq-way-row { display: flex; gap: 6px; align-items: center; font-size: 12px;
+  background: #f6f8fc; border-radius: 6px; padding: 4px 6px; }
+.pq-way-order { color: var(--muted); font-weight: 600; min-width: 22px; flex: none; }
+.pq-way-ban { min-width: 18px; }
+.pq-way-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pq-way-move, .pq-way-del { border: none; background: none; cursor: pointer; padding: 0 2px;
+  font-size: 12px; color: var(--muted); flex: none; }
+.pq-way-move:hover { color: var(--primary); }
+.pq-way-del { color: var(--danger); }
+.pq-waypick { margin-bottom: 4px; }
+.pq-req-badge { flex: none; margin-right: 4px; }
+.pq-req-chip { white-space: normal; }
 .query-card .pq-result { overflow: auto; display: flex; flex-direction: column; gap: 8px; }
 .pq-banner { border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.5; }
 .pq-banner.pq-ok { background: var(--ok-bg); color: var(--ok); }

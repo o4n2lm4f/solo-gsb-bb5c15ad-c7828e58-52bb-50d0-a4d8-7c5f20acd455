@@ -2,7 +2,8 @@
 
 // 目标路径查询自检（node test/pathquery.js）
 // 覆盖：最短选项链、每步状态、无解时的差异最少可达状态与缺失变量、
-//       状态上限截断（不能断言无解）、循环终止、参数校验、HTTP API。
+//       状态上限截断（不能断言无解）、循环终止、参数校验、HTTP API、
+//       有序必经选项（progress 纳入去重键）、禁用选项、必经/禁用冲突与 UID 校验。
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -187,6 +188,254 @@ ok('示例：回退到约束全满足但非目标场景的最近状态',
   rd2.closest && rd2.closest.isTargetScene === false && rd2.closest.mismatchCount === 0);
 ok('示例：可断言无解（状态空间完整穷举）', rd2.canAssertUnsolvable === true);
 
+// ---------- 有序必经选项 ----------
+console.log('有序必经选项：');
+// 直路 1 步到 c；绕路 a->b->d->c 依次经过 take(get)->deliver，3 步；
+// a->b 之后也可直接 b->c（2 步）但不经过 deliver，不算命中
+const storyR = {
+  startScene: 'a',
+  variables: [],
+  scenes: [
+    {
+      id: 'a', options: [
+        { uid: 'u-direct', text: '直接走', target: 'c' },
+        { uid: 'u-take', text: '先取东西', target: 'b' },
+      ],
+    },
+    {
+      id: 'b', options: [
+        { uid: 'u-bc', text: '直接去 c', target: 'c' },
+        { uid: 'u-deliver', text: '送到 d', target: 'd' },
+      ],
+    },
+    { id: 'd', options: [{ uid: 'u-dc', text: '到 c', target: 'c' }] },
+    { id: 'c', options: [] },
+  ],
+};
+const rr1 = queryPath(storyR, { targetScene: 'c', requiredOptionUids: ['u-take', 'u-deliver'] });
+ok('按必经顺序命中', rr1.found === true);
+ok('最短为 3 步（2 步的 b->c 跳过第 2 条必经项）', rr1.depth === 3);
+ok('路径 a -> b -> d -> c',
+  rr1.path.filter((n) => n.kind === 'scene').map((n) => n.sceneId).join(',') === 'a,b,d,c');
+ok('路径选项 UID 即 take -> deliver -> dc',
+  rr1.path.filter((n) => n.kind === 'option').map((n) => n.optionUid).join(',') === 'u-take,u-deliver,u-dc');
+ok('必经边携带顺序号 requiredOrder（1、2），非必经边为 null',
+  JSON.stringify(rr1.path.filter((n) => n.kind === 'option').map((n) => n.requiredOrder)) === '[1,2,null]');
+ok('命中时未完成必经项为空', Array.isArray(rr1.remainingRequired) && rr1.remainingRequired.length === 0);
+ok('结果回显必经/禁用解析信息',
+  rr1.requiredOptions.length === 2 && rr1.requiredOptions[0].order === 1 &&
+  rr1.requiredOptions[0].sceneId === 'a' && rr1.requiredOptions[1].uid === 'u-deliver');
+
+// 顺序给反：[deliver, take] —— deliver 在 b，take 在 a，物理上无法按此顺序到达
+const rr2 = queryPath(storyR, { targetScene: 'c', requiredOptionUids: ['u-deliver', 'u-take'] });
+ok('必经顺序不可达 => 无解', rr2.found === false && rr2.canAssertUnsolvable === true);
+ok('无解结果列出最近状态处未完成的必经项（已完成 deliver，仍欠 take，顺序号 2 保留）',
+  rr2.remainingRequired.length === 1 &&
+  rr2.remainingRequired[0].order === 2 && rr2.remainingRequired[0].uid === 'u-take');
+ok('最近状态在目标场景上且已完成 1 条必经项',
+  rr2.closest && rr2.closest.isTargetScene === true && rr2.closest.completedRequired === 1);
+
+// 无任何必经项可完成时，最近状态进度为 0，未完成清单为全部必经项
+const rr2b = queryPath(storyR, { targetScene: 'c', requiredOptionUids: ['u-dc', 'u-take'] });
+// u-dc 在 d（d->c），完成后无后续场景可再取 take
+ok('后续必经无法完成时未完成清单保留其顺序号',
+  rr2b.found === false && rr2b.remainingRequired.length === 1 && rr2b.remainingRequired[0].uid === 'u-take');
+
+// 乱序经过不算完成：b 上有必经 1(w3)/必经 2(w2) 两个选项都到 c；c 可回 b 或直去终点 t。
+// 乱序捷径 w2->(回b)w3->t 在到达 t 时进度只有 1，不得命中；必须 w3 后再经过 w2。
+const storyOrder = {
+  startScene: 'a',
+  variables: [],
+  scenes: [
+    { id: 'a', options: [{ uid: 'w-ab', text: '进入 b', target: 'b' }] },
+    {
+      id: 'b', options: [
+        { uid: 'w2', text: '必经 2', target: 'c' },
+        { uid: 'w3', text: '必经 1', target: 'c' },
+      ],
+    },
+    {
+      id: 'c', options: [
+        { uid: 'w-back', text: '返回 b', target: 'b' },
+        { uid: 'w-go', text: '直去终点（乱序时的捷径）', target: 't' },
+      ],
+    },
+    { id: 't', options: [] },
+  ],
+};
+const ro = queryPath(storyOrder, { targetScene: 't', requiredOptionUids: ['w3', 'w2'] });
+ok('乱序捷径不命中；按 w3 -> w2 顺序绕环后命中',
+  ro.found === true && ro.depth === 5 &&
+  ro.path.filter((n) => n.kind === 'scene').map((n) => n.sceneId).join(',') === 'a,b,c,b,c,t' &&
+  ro.path.filter((n) => n.kind === 'option').map((n) => n.optionUid).join(',') === 'w-ab,w3,w-back,w2,w-go');
+
+// 只允许乱序的剧情（w2 唯一可达、w3 在 w2 之后无法再取得 w2）=> 无解
+const storyNoOrder = {
+  startScene: 'a',
+  variables: [],
+  scenes: [
+    { id: 'a', options: [{ uid: 'n2', text: '先到 b（必经 2）', target: 'b' }] },
+    { id: 'b', options: [{ uid: 'n3', text: '再到 c（必经 1）', target: 'c' }] },
+    { id: 'c', options: [{ uid: 'n-go', text: '终点', target: 't' }] },
+    { id: 't', options: [] },
+  ],
+};
+const rno = queryPath(storyNoOrder, { targetScene: 't', requiredOptionUids: ['n3', 'n2'] });
+ok('物理上无法按指定顺序到达 => 无解，且最近状态（已完成 n3）未完成清单保留 n2 的顺序号 2',
+  rno.found === false && rno.canAssertUnsolvable === true &&
+  rno.remainingRequired.length === 1 &&
+  rno.remainingRequired[0].order === 2 && rno.remainingRequired[0].uid === 'n2');
+
+// 重复经过同一条必经选项只应推进一次（loop 场景）
+const storyLoopReq = {
+  startScene: 'a',
+  variables: [],
+  scenes: [
+    {
+      id: 'a', options: [
+        { uid: 'rl-loop', text: '打个转', target: 'a' },
+        { uid: 'rl-go', text: '去终点', target: 'b' },
+      ],
+    },
+    { id: 'b', options: [] },
+  ],
+};
+const rlr = queryPath(storyLoopReq, { targetScene: 'b', requiredOptionUids: ['rl-loop'] });
+ok('必经一次即可（循环中可重复经过）', rlr.found === true && rlr.depth === 2);
+
+// 必经项 + 变量约束同时生效
+const storyRC = {
+  startScene: 'a',
+  variables: ['k'],
+  scenes: [
+    {
+      id: 'a', options: [
+        { uid: 'rc-take', text: '拿钥匙再走', target: 'b', assigns: [{ variable: 'k', value: true }] },
+      ],
+    },
+    { id: 'b', options: [{ uid: 'rc-go', text: '到 c', target: 'c' }] },
+    { id: 'c', options: [] },
+  ],
+};
+const rrc = queryPath(storyRC, {
+  targetScene: 'c',
+  constraints: [{ variable: 'k', value: true }],
+  requiredOptionUids: ['rc-take'],
+});
+ok('必经 + 变量约束同时命中', rrc.found === true && rrc.finalState.k === true && rrc.depth === 2);
+
+// ---------- 禁用选项 ----------
+console.log('禁用选项：');
+// a->c 直路（禁用后不可用），只能 a->b->c
+const storyF = {
+  startScene: 'a',
+  variables: [],
+  scenes: [
+    {
+      id: 'a', options: [
+        { uid: 'f-short', text: '捷径（禁用）', target: 'c' },
+        { uid: 'f-long', text: '绕路', target: 'b' },
+      ],
+    },
+    { id: 'b', options: [{ uid: 'f-bc', text: '到 c', target: 'c' }] },
+    { id: 'c', options: [] },
+  ],
+};
+const rf1 = queryPath(storyF, { targetScene: 'c', forbiddenOptionUids: ['f-short'] });
+ok('禁用捷径后绕路命中', rf1.found === true && rf1.depth === 2);
+ok('路径中不出现禁用选项',
+  rf1.path.filter((n) => n.kind === 'option').every((n) => n.optionUid !== 'f-short'));
+ok('结果回显禁用项解析信息',
+  rf1.forbiddenOptions.length === 1 && rf1.forbiddenOptions[0].uid === 'f-short' &&
+  rf1.forbiddenOptions[0].sceneId === 'a');
+
+// 禁用唯一通路 => 目标不可达，回退状态不在目标场景
+const rf2 = queryPath(storyF, { targetScene: 'c', forbiddenOptionUids: ['f-short', 'f-long'] });
+ok('禁用全部出口后目标不可达',
+  rf2.found === false && rf2.targetReachable === false && rf2.closest.sceneId === 'a');
+
+// 必经 + 禁用同时给出：必经可达，但禁用项挡住必经时无解
+const rf3 = queryPath(storyF, {
+  targetScene: 'c',
+  requiredOptionUids: ['f-bc'],
+  forbiddenOptionUids: ['f-long'],
+});
+ok('禁用了通往必经项的唯一道路 => 无解', rf3.found === false);
+ok('未完成必经项包含 f-bc', rf3.remainingRequired.some((x) => x.uid === 'f-bc'));
+
+// ---------- 必经 / 禁用参数校验 ----------
+console.log('必经 / 禁用参数校验：');
+ok('必经 UID 不存在 => 400', throws400(
+  () => queryPath(storyF, { targetScene: 'c', requiredOptionUids: ['nope'] }), /不存在/));
+ok('禁用 UID 不存在 => 400', throws400(
+  () => queryPath(storyF, { targetScene: 'c', forbiddenOptionUids: ['nope'] }), /不存在/));
+ok('必经与禁用冲突 => 400', throws400(
+  () => queryPath(storyF, {
+    targetScene: 'c',
+    requiredOptionUids: ['f-long'],
+    forbiddenOptionUids: ['f-long'],
+  }), /冲突/));
+ok('必经列表内部重复 => 400', throws400(
+  () => queryPath(storyF, { targetScene: 'c', requiredOptionUids: ['f-long', 'f-long'] }), /重复/));
+ok('禁用列表内部重复 => 400', throws400(
+  () => queryPath(storyF, { targetScene: 'c', forbiddenOptionUids: ['f-long', 'f-long'] }), /重复/));
+ok('UID 列表非数组 => 400', throws400(
+  () => queryPath(storyF, { targetScene: 'c', requiredOptionUids: 'f-long' }), /数组/));
+ok('空 UID 项被忽略（等同于无必经）',
+  queryPath(storyF, { targetScene: 'c', requiredOptionUids: ['', null] }).depth === 1);
+
+// ---------- progress 去重：同一 (场景,状态) 在不同必经进度下分别入队 ----------
+// 若错误地只按 场景+状态 去重，环路中“先到 b 但未经过必经”会挡住“经过必经后再到 b”的状态
+const storyProg = {
+  startScene: 'a',
+  variables: [],
+  scenes: [
+    {
+      id: 'a', options: [
+        { uid: 'p-ab', text: '去 b', target: 'b' },
+        { uid: 'p-ax', text: '先去 x 经过必经', target: 'x' },
+      ],
+    },
+    { id: 'b', options: [{ uid: 'p-bc', text: '到终点', target: 'c' }] },
+    {
+      id: 'x', options: [
+        { uid: 'p-mark', text: '必经动作并回 a', target: 'a' },
+      ],
+    },
+    { id: 'c', options: [] },
+  ],
+};
+const rp = queryPath(storyProg, { targetScene: 'c', requiredOptionUids: ['p-mark'] });
+ok('progress 纳入去重：绕环经过必经后仍能命中', rp.found === true && rp.depth === 4);
+ok('progress 命中路径 a->x->a->b->c',
+  rp.path.filter((n) => n.kind === 'scene').map((n) => n.sceneId).join(',') === 'a,x,a,b,c');
+
+// ---------- 截断 + 必经：未完成必经项随截断结果返回 ----------
+const storyTr = {
+  startScene: 'a',
+  variables: ['k'],
+  scenes: [
+    {
+      id: 'a', options: [
+        { uid: 'tr-to-b', text: '去 b', target: 'b' },
+        { uid: 'tr-mark', text: '必经（在不可达孤岛中）', target: 'zz' },
+      ],
+    },
+    { id: 'b', options: [{ text: '到 c', target: 'c' }] },
+    { id: 'c', options: [] },
+    { id: 'zz', options: [] },
+  ],
+};
+const rtr = queryPath(storyTr, {
+  targetScene: 'c',
+  requiredOptionUids: ['tr-mark'],
+}, { maxStates: 1 });
+ok('截断时 truncated=true 且不能断言无解', rtr.truncated === true && rtr.canAssertUnsolvable === false);
+ok('截断结果返回未完成必经项', rtr.remainingRequired.length === 1 && rtr.remainingRequired[0].uid === 'tr-mark');
+ok('截断提示文案含未完成计数', /未完成必经项 1\/1/.test(rtr.message));
+ok('（对照）不存在的 UID 仍然 400', throws400(
+  () => queryPath(story2, { targetScene: 'c', requiredOptionUids: ['ghost-uid-not-used'] }), /不存在/));
+
 // ---------- HTTP API ----------
 (async () => {
   console.log('HTTP API：');
@@ -239,6 +488,43 @@ ok('示例：可断言无解（状态空间完整穷举）', rd2.canAssertUnsolv
       targetScene: 'c', constraints: [{ variable: 'k', value: true }, { variable: 'k', value: false }],
     });
     ok('重复约束返回 400', q5.status === 400);
+
+    // 有序必经 / 禁用选项（API 层校验）
+    const storyUid = {
+      startScene: 'a',
+      scenes: [
+        {
+          id: 'a', options: [
+            { uid: 's-direct', text: '直走', target: 'c' },
+            { uid: 's-via', text: '绕路', target: 'b' },
+          ],
+        },
+        { id: 'b', options: [{ uid: 's-bc', text: '到 c', target: 'c' }] },
+        { id: 'c', options: [] },
+      ],
+    };
+    const q6 = await post('/api/pathquery', {
+      story: storyUid,
+      query: { targetScene: 'c', requiredOptionUids: ['s-via', 's-bc'] },
+    });
+    ok('POST /api/pathquery 有序必经命中（2 步）',
+      q6.status === 200 && q6.body.found === true && q6.body.depth === 2 &&
+      q6.body.remainingRequired.length === 0);
+    const q7 = await post('/api/pathquery', {
+      story: storyUid,
+      query: { targetScene: 'c', forbiddenOptionUids: ['s-direct'] },
+    });
+    ok('POST /api/pathquery 禁用捷径后绕路', q7.status === 200 && q7.body.depth === 2);
+    const q8 = await post('/api/pathquery', {
+      story: storyUid,
+      query: { targetScene: 'c', requiredOptionUids: ['s-via'], forbiddenOptionUids: ['s-via'] },
+    });
+    ok('必经与禁用冲突返回 400', q8.status === 400 && /冲突/.test(q8.body.error || ''));
+    const q9 = await post('/api/pathquery', {
+      story: storyUid,
+      query: { targetScene: 'c', requiredOptionUids: ['missing-uid'] },
+    });
+    ok('必经 UID 不存在返回 400', q9.status === 400 && /不存在/.test(q9.body.error || ''));
   } finally {
     server.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });

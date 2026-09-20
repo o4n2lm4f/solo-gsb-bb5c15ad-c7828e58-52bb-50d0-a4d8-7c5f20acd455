@@ -157,15 +157,20 @@ npm start
 
 ## 目标路径查询
 
-编辑页右侧的「目标路径查询」面板回答另一类问题：**“怎样走才能在到达某场景时让指定变量为真 / 为假？”**
+编辑页右侧的「目标路径查询」面板回答另一类问题：**“怎样走才能在到达某场景时让指定变量为真 / 为假，并且按规定顺序经过若干选项、同时避开某些选项？”**
 
 1. 选择 **目标场景**，并可添加若干条 **到达约束**（变量 = true / false；不添加约束则只要求到达目标场景）；
-2. 后端在「场景 + 完整变量状态」的具体状态空间上执行 **可终止的 BFS**（与分析器相同的状态去重与约 100 万状态上限），返回 **满足约束的最短选项链及每步状态**（每个场景节点带到达时的完整变量取值，每条选项边带选择后的状态）；
-3. **无解时**返回与目标约束 **差异最少的可达状态**（目标场景上的到达状态优先，其次缺失变量更少、路径更短）、**缺失变量清单**（变量、期望值、实际值）以及到达该状态的 **最近路径**；目标场景本身不可达时，回退到全剧情中最接近约束的可达状态并明确标注；
-4. 若搜索因 **状态上限被截断**，结果以 `canAssertUnsolvable: false` 标明 **不能断言无解**（只有完整穷举后才敢下“无解”结论）；
-5. 查询针对的是 **编辑中的草稿**（不落盘）；剧情或查询条件被修改后，旧结果会标记为 **可能过期**，重新「查询路径」即可。
+2. 可选地添加 **有序必经选项**：从全剧情选项中按 **稳定 UID** 选择若干条，用 ↑ / ↓ 调整顺序，路径必须**依次**经过它们（先第 1 条、再第 2 条……，先经过后项、再经过前项的乱序走法不算完成）；
+3. 可选地添加 **禁用选项**：被禁用的选项在搜索时**不扩展**，路径中不可能出现；
+4. 后端在「场景 + 完整变量状态」的具体状态空间上执行 **可终止的 BFS**（与分析器相同的约 100 万状态上限），并把**「已完成的必经序号」并入去重键**——同一 `(场景, 变量状态)` 在不同必经进度下视为不同局面，因此含循环的剧情也能表达“先绕一圈完成必经，再回到同一场景继续走”；
+5. 返回 **满足全部条件的最短选项链及每步状态**（场景节点带到达时完整变量取值，选项边带选择后状态；命中的必经边额外带「必经 N」顺序标记）；**只有依次经过全部必经项、禁用项一次未用、且位于目标场景并满足全部变量约束才算命中**；
+6. **无解时**返回与目标 **差异最少的可达状态**：目标场景上的到达状态优先，其次已完成的必经项更多（未完成必经项更少），再次缺失变量更少、路径更短；并给出 **缺失变量清单**、**未完成必经项清单**（带应有顺序号）以及到达该状态的最近路径；目标场景本身不可达时，回退到全剧情中最接近条件的可达状态并明确标注；
+7. 若搜索因 **状态上限被截断**，结果以 `canAssertUnsolvable: false` 标明 **不能断言无解**（只有完整穷举后才敢下“无解”结论），截断结果同样携带未完成必经项；
+8. 查询针对的是 **编辑中的草稿**（不落盘）；剧情或查询条件（目标场景、约束、必经顺序 / 名单、禁用名单）被修改后，旧结果会标记为 **可能过期**，重新「查询路径」即可。新增选项首次被面板看到时会就地补一个与服务端同规则的稳定 UID，保存后该 UID 原样落盘。
 
-响应要点：`found`（是否命中）、`depth`（选项链长度）、`path`（场景/选项交替的每步状态）、`finalState`；无解时 `closest`（差异最少状态、缺失变量 `missing`、最近路径 `path`）、`canAssertUnsolvable`、`truncated`、`statesExplored`。
+**API 校验**：`requiredOptionUids` 与 `forbiddenOptionUids` 中的每个 UID 都必须在剧情中存在（否则 400）；同一名单内不允许重复；同一个 UID **不得同时**出现在必经与禁用名单中（冲突时 400）。
+
+响应要点：`found`（是否命中）、`depth`（选项链长度）、`path`（场景/选项交替的每步状态，必经边带 `requiredOrder`）、`finalState`、`requiredOptions` / `forbiddenOptions`（解析后的选项信息）、`requiredTotal` / `forbiddenTotal`；无解时还有 `closest`（差异最少状态、缺失变量 `missing`、未完成必经项 `remainingRequired`、最近路径 `path`）、顶层 `remainingRequired`、`canAssertUnsolvable`、`truncated`、`statesExplored`。
 
 ## HTTP API
 
@@ -187,7 +192,22 @@ npm start
 
 对比结果 `summary` 形如 `{ total, new, fixed, persistent, changed }`；`items` 中每条为 `{ status, issue, before, changes }`（`issue` 为当前问题、`before` 为基线快照；`changes` 为 `['path']` / `['message']`）。每条问题都带 `fingerprint` 字段（16 位 SHA-1）。
 
-路径查询的 `query` 形如 `{ "targetScene": "throneRoom", "constraints": [{ "variable": "hasKey", "value": true }] }`；响应中 `found=true` 时含 `depth` / `path` / `finalState`，否则含 `closest`（差异最少状态、缺失变量 `missing`、最近路径）与 `canAssertUnsolvable`（为 `false` 表示因状态上限截断、不能断言无解）。
+路径查询的 `query` 形如：
+
+```json
+{
+  "targetScene": "throneRoom",
+  "constraints": [{ "variable": "hasKey", "value": true }],
+  "requiredOptionUids": ["opt-a1b2c3d4", "opt-e5f6a7b8"],
+  "forbiddenOptionUids": ["opt-00112233"]
+}
+```
+
+- `requiredOptionUids`：**有序必经选项** UID 数组，路径必须按数组顺序依次经过；
+- `forbiddenOptionUids`：**禁用选项** UID 数组，搜索时不扩展这些选项；
+- 两个数组均可省略（向后兼容旧请求）。UID 必须存在、名单内不得重复、必经与禁用不得冲突，否则返回 `400` 及错误说明。
+
+响应中 `found=true` 时含 `depth` / `path`（必经边带 `requiredOrder`）/ `finalState` / `requiredOptions` / `forbiddenOptions`；否则含 `closest`（差异最少状态、缺失变量 `missing`、未完成必经项 `remainingRequired`、最近路径）、顶层 `remainingRequired` 与 `canAssertUnsolvable`（为 `false` 表示因状态上限截断、不能断言无解）。
 
 ## 目录结构
 
@@ -197,7 +217,7 @@ npm start
 ├── src/
 │   ├── expression.js      # 布尔表达式递归下降解析器 / 求值 / 失败解释
 │   ├── analyzer.js        # 「场景+状态」BFS 传播去重分析引擎（附带问题指纹）
-│   ├── pathquery.js       # 目标路径查询：可终止 BFS 求最短选项链 / 差异最少可达状态
+│   ├── pathquery.js       # 目标路径查询：可终止 BFS（去重键含必经序号）/ 有序必经项 / 禁用项 / 差异最少状态
 │   ├── fingerprint.js     # 不依赖数组顺序的问题稳定指纹
 │   ├── baseline.js        # 基线快照构建与新增/已修复/仍存在/详情变化对比
 │   └── storage.js         # JSON 文件存储、首启播种、选项 UID 与基线持久化

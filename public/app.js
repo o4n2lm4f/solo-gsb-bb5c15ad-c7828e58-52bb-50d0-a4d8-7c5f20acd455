@@ -14,7 +14,7 @@ const state = {
   diffStale: false,     // 对比之后剧情又被编辑过
   detailItem: null,     // 详情面板当前展示的对比条目
   detailPathMode: 'after', // 详情中查看的路径：after（当前）/ before（基线）
-  pathQuery: { targetScene: '', constraints: [] }, // 目标路径查询条件（编辑中）
+  pathQuery: { targetScene: '', constraints: [], requiredUids: [], forbiddenUids: [] }, // 目标路径查询条件（编辑中）
   pathQueryResult: null,  // 最近一次路径查询结果
   pathQueryStale: false,  // 查询之后剧情或查询条件又被修改过
   _pqSig: null,           // 查询面板场景/变量签名（避免每次编辑都重建下拉框）
@@ -71,7 +71,7 @@ async function openStory(id) {
   state.diffFilter = 'all';
   state.diffStale = false;
   state.detailItem = null;
-  state.pathQuery = { targetScene: '', constraints: [] };
+  state.pathQuery = { targetScene: '', constraints: [], requiredUids: [], forbiddenUids: [] };
   state.pathQueryResult = null;
   state.pathQueryStale = false;
   state._pqSig = null;
@@ -132,7 +132,7 @@ async function deleteStory() {
   state.diff = null;
   state.detailItem = null;
   state.diffStale = false;
-  state.pathQuery = { targetScene: '', constraints: [] };
+  state.pathQuery = { targetScene: '', constraints: [], requiredUids: [], forbiddenUids: [] };
   state.pathQueryResult = null;
   state.pathQueryStale = false;
   state._pqSig = null;
@@ -579,9 +579,62 @@ const DIFF_META = {
 function pqSignature() {
   if (!state.story) return '';
   return JSON.stringify([
-    state.story.scenes.map((s) => s.id),
+    state.story.scenes.map((s) => [s.id, s.title]),
     state.story.variables.map((v) => v.name),
+    pqAllOptions().map((o) => [o.uid, o.sceneId, o.index, o.text, o.target]),
   ]);
+}
+
+/**
+ * 为缺少 uid 的选项就地回填稳定 UID（与后端保存时的 normalize 同规则）。
+ * 必经 / 禁用按 UID 选择，因此面板每次渲染前先确保全部选项都有 UID；
+ * 回填只是“提前生成”服务端本就会生成的身份，不改变剧情内容，不标脏。
+ */
+function ensureOptionUids() {
+  if (!state.story) return;
+  const used = new Set();
+  const collect = () => {
+    let u;
+    do {
+      u = `opt-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 8)}`;
+    } while (used.has(u));
+    used.add(u);
+    return u;
+  };
+  for (const sc of state.story.scenes || []) {
+    for (const opt of sc.options || []) {
+      const u = String(opt.uid || '').trim();
+      if (/^[A-Za-z0-9_-]{4,40}$/.test(u) && !used.has(u)) used.add(u);
+      else opt.uid = collect();
+    }
+  }
+}
+
+/** 全部选项的扁平列表：{ uid, sceneId, sceneTitle, index, text, target, option } */
+function pqAllOptions() {
+  if (!state.story) return [];
+  const out = [];
+  for (const sc of state.story.scenes || []) {
+    (sc.options || []).forEach((opt, idx) => {
+      if (!opt.uid) return;
+      out.push({
+        uid: String(opt.uid), sceneId: sc.id, sceneTitle: sc.title || '',
+        index: idx, text: opt.text || `选项 ${idx + 1}`,
+        target: (opt.target || '').trim(), option: opt,
+      });
+    });
+  }
+  return out;
+}
+
+function pqOptionByUid(uid) {
+  return pqAllOptions().find((o) => o.uid === uid) || null;
+}
+
+/** 选项在查询面板中的可读标签 */
+function pqOptionLabel(o) {
+  const target = o.target ? ` → ${o.target}` : ' →（无跳转）';
+  return `[${o.sceneId} #${o.index + 1}] ${o.text || '（无文案）'}${target}`;
 }
 
 function markPathQueryStale() {
@@ -596,7 +649,21 @@ function renderPathQueryPanel() {
   if (!state.story) { card.hidden = true; return; }
   card.hidden = false;
 
-  // 仅当场景集合 / 变量集合变化时才重建下拉框与约束行，避免打断正在进行的交互
+  // 必经 / 禁用按稳定 UID 选择：渲染前先保证全部选项都有 UID
+  ensureOptionUids();
+
+  // 清理已随编辑消失的 UID（删除场景 / 选项后），并标记旧结果过期
+  const allUids = new Set(pqAllOptions().map((o) => o.uid));
+  const reqBefore = state.pathQuery.requiredUids.length;
+  const forBefore = state.pathQuery.forbiddenUids.length;
+  state.pathQuery.requiredUids = state.pathQuery.requiredUids.filter((u) => allUids.has(u));
+  state.pathQuery.forbiddenUids = state.pathQuery.forbiddenUids.filter((u) => allUids.has(u));
+  if (state.pathQueryResult &&
+      (state.pathQuery.requiredUids.length !== reqBefore || state.pathQuery.forbiddenUids.length !== forBefore)) {
+    markPathQueryStale();
+  }
+
+  // 仅当场景 / 变量 / 选项集合变化时才重建下拉框与约束行，避免打断正在进行的交互
   const sig = pqSignature();
   if (sig !== state._pqSig) {
     state._pqSig = sig;
@@ -620,10 +687,132 @@ function renderPathQueryPanel() {
       sel.value = '';
     }
     renderPqConstraints();
+    renderPqWaypoints();
   }
 
   $('pqStale').hidden = !state.pathQueryStale;
   renderPathQueryResult();
+}
+
+/** 渲染有序必经 / 禁用两组名单及其“添加”下拉框 */
+function renderPqWaypoints() {
+  renderPqRequiredRows();
+  renderPqForbiddenRows();
+  renderPqRequiredPick();
+  renderPqForbiddenPick();
+}
+
+function renderPqRequiredRows() {
+  const box = $('pqRequired');
+  box.innerHTML = '';
+  state.pathQuery.requiredUids.forEach((uid, i) => {
+    const o = pqOptionByUid(uid);
+    const row = document.createElement('div');
+    row.className = 'pq-way-row';
+    const order = document.createElement('span');
+    order.className = 'pq-way-order';
+    order.textContent = `${i + 1}.`;
+    const label = document.createElement('span');
+    label.className = 'pq-way-label';
+    label.textContent = o ? pqOptionLabel(o) : `(已删除: ${uid})`;
+    label.title = uid;
+
+    const up = document.createElement('button');
+    up.className = 'pq-way-move';
+    up.textContent = '↑';
+    up.title = '前移';
+    up.disabled = i === 0;
+    up.addEventListener('click', () => {
+      if (i === 0) return;
+      const list = state.pathQuery.requiredUids;
+      [list[i - 1], list[i]] = [list[i], list[i - 1]];
+      renderPqWaypoints();
+      markPathQueryStale();
+    });
+
+    const down = document.createElement('button');
+    down.className = 'pq-way-move';
+    down.textContent = '↓';
+    down.title = '后移';
+    down.disabled = i === state.pathQuery.requiredUids.length - 1;
+    down.addEventListener('click', () => {
+      const list = state.pathQuery.requiredUids;
+      if (i === list.length - 1) return;
+      [list[i + 1], list[i]] = [list[i], list[i + 1]];
+      renderPqWaypoints();
+      markPathQueryStale();
+    });
+
+    const del = document.createElement('button');
+    del.className = 'pq-way-del';
+    del.textContent = '✕';
+    del.title = '移除';
+    del.addEventListener('click', () => {
+      state.pathQuery.requiredUids.splice(i, 1);
+      renderPqWaypoints();
+      markPathQueryStale();
+    });
+
+    row.append(order, label, up, down, del);
+    box.appendChild(row);
+  });
+}
+
+function renderPqForbiddenRows() {
+  const box = $('pqForbidden');
+  box.innerHTML = '';
+  state.pathQuery.forbiddenUids.forEach((uid, i) => {
+    const o = pqOptionByUid(uid);
+    const row = document.createElement('div');
+    row.className = 'pq-way-row';
+    const dot = document.createElement('span');
+    dot.className = 'pq-way-order pq-way-ban';
+    dot.textContent = '⛔';
+    const label = document.createElement('span');
+    label.className = 'pq-way-label';
+    label.textContent = o ? pqOptionLabel(o) : `(已删除: ${uid})`;
+    label.title = uid;
+
+    const del = document.createElement('button');
+    del.className = 'pq-way-del';
+    del.textContent = '✕';
+    del.title = '移除';
+    del.addEventListener('click', () => {
+      state.pathQuery.forbiddenUids.splice(i, 1);
+      renderPqWaypoints();
+      markPathQueryStale();
+    });
+
+    row.append(dot, label, del);
+    box.appendChild(row);
+  });
+}
+
+/** “添加必经选项”下拉：已在必经 / 禁用名单中的选项不可再选 */
+function renderPqRequiredPick() {
+  const sel = $('pqRequiredPick');
+  sel.innerHTML = '<option value="">（选择要追加到必经列表的选项）</option>';
+  const taken = new Set([...state.pathQuery.requiredUids, ...state.pathQuery.forbiddenUids]);
+  for (const o of pqAllOptions()) {
+    const opt = document.createElement('option');
+    opt.value = o.uid;
+    opt.textContent = pqOptionLabel(o);
+    if (taken.has(o.uid)) { opt.disabled = true; opt.textContent += '（已在名单中）'; }
+    sel.appendChild(opt);
+  }
+}
+
+function renderPqForbiddenPick() {
+  const sel = $('pqForbiddenPick');
+  sel.innerHTML = '<option value="">（选择要禁用的选项）</option>';
+  const taken = new Set([...state.pathQuery.requiredUids, ...state.pathQuery.forbiddenUids]);
+  for (const o of pqAllOptions()) {
+    const opt = document.createElement('option');
+    opt.value = o.uid;
+    opt.textContent = pqOptionLabel(o);
+    if (taken.has(o.uid)) { opt.disabled = true; opt.textContent += '（已在名单中）'; }
+    sel.appendChild(opt);
+  }
 }
 
 function renderPqConstraints() {
@@ -671,7 +860,12 @@ async function runPathQuery() {
   try {
     const result = await api('POST', '/api/pathquery', {
       story: state.story,
-      query: { targetScene, constraints },
+      query: {
+        targetScene,
+        constraints,
+        requiredOptionUids: [...state.pathQuery.requiredUids],
+        forbiddenOptionUids: [...state.pathQuery.forbiddenUids],
+      },
     });
     state.pathQueryResult = result;
     state.pathQueryStale = false;
@@ -699,7 +893,12 @@ function buildQueryPathView(path, knownVars, found) {
     } else {
       const div = document.createElement('div');
       div.className = 'path-edge';
-      div.textContent = `选项 ${node.optionIndex + 1}「${node.optionText || ''}」 → ${node.target}`;
+      const reqBadge = node.requiredOrder
+        ? `<span class="badge badge-ok pq-req-badge" title="按顺序经过的必经选项">必经 ${node.requiredOrder}</span>`
+        : '';
+      div.innerHTML = `${reqBadge}<span></span>`;
+      div.querySelector('span:last-child').textContent =
+        `选项 ${node.optionIndex + 1}「${node.optionText || ''}」 → ${node.target}`;
       if (node.stateAfter) {
         div.insertAdjacentHTML('beforeend', stateChips(node.stateAfter, knownVars || []));
       }
@@ -713,6 +912,10 @@ function appendQueryNotes(box, r) {
   const notes = [];
   if (r.startBlocked) {
     notes.push('起点场景的前置条件在初始状态下不成立，剧情无法开始，没有任何可达状态。');
+  }
+  if (r.forbiddenOptions && r.forbiddenOptions.length) {
+    const labels = r.forbiddenOptions.map((o) => `[${o.sceneId} #${o.optionIndex + 1}] ${o.text || '（无文案）'}`);
+    notes.push(`本次查询已禁用 ${r.forbiddenOptions.length} 条选项（路径不会经过）：${labels.join('、')}。`);
   }
   if (r.unknownConstraintVars && r.unknownConstraintVars.length) {
     notes.push(`约束变量 ${r.unknownConstraintVars.join('、')} 未声明且从未被赋值，在状态中恒为 false。`);
@@ -728,6 +931,24 @@ function appendQueryNotes(box, r) {
   }
 }
 
+/** 未完成必经项清单（在结果框中追加） */
+function appendRemainingRequired(box, remaining, total) {
+  if (!remaining || !remaining.length) return;
+  const miss = document.createElement('div');
+  miss.className = 'pq-missing';
+  const label = document.createElement('span');
+  label.className = 'pq-missing-label';
+  label.textContent = `未完成必经项（${remaining.length}/${total}，需按顺序经过）：`;
+  miss.appendChild(label);
+  for (const w of remaining) {
+    const chip = document.createElement('code');
+    chip.className = 'pq-missing-chip pq-req-chip';
+    chip.textContent = `${w.order}. [${w.sceneId} #${(w.optionIndex ?? -1) + 1}] ${w.text || '（无文案）'}`;
+    miss.appendChild(chip);
+  }
+  box.appendChild(miss);
+}
+
 function renderPathQueryResult() {
   const box = $('pqResult');
   box.innerHTML = '';
@@ -737,7 +958,8 @@ function renderPathQueryResult() {
   const banner = document.createElement('div');
   if (r.found) {
     banner.className = 'pq-banner pq-ok';
-    banner.textContent = `✓ 找到最短选项链（${r.depth} 步），到达「${r.targetScene}」时满足全部约束`;
+    const reqTail = r.requiredTotal ? `，并依次经过全部 ${r.requiredTotal} 条必经选项` : '';
+    banner.textContent = `✓ 找到最短选项链（${r.depth} 步），到达「${r.targetScene}」时满足全部约束${reqTail}`;
     box.appendChild(banner);
     appendQueryNotes(box, r);
     box.appendChild(buildQueryPathView(r.path, r.knownVars, true));
@@ -745,11 +967,17 @@ function renderPathQueryResult() {
   }
 
   banner.className = 'pq-banner ' + (r.canAssertUnsolvable ? 'pq-err' : 'pq-warn');
+  const reqGap = r.requiredTotal
+    ? `（必经 ${r.requiredTotal - (r.closest && r.closest.completedRequired || 0)}/${r.requiredTotal} 未完成）`
+    : '';
   banner.textContent = r.canAssertUnsolvable
-    ? `✗ 无解：已穷举全部 ${r.statesExplored} 个可达状态，不存在满足约束的到达状态`
-    : `⚠ 未找到满足约束的到达状态；状态数达到上限（已探索 ${r.statesExplored} 个）搜索被截断，不能断言无解`;
+    ? `✗ 无解：已穷举全部 ${r.statesExplored} 个可达状态，不存在依次经过全部必经项并满足约束的到达状态 ${reqGap}`
+    : `⚠ 未找到满足条件的到达状态${reqGap}；状态数达到上限（已探索 ${r.statesExplored} 个）搜索被截断，不能断言无解`;
   box.appendChild(banner);
   appendQueryNotes(box, r);
+  if (r.remainingRequired && r.remainingRequired.length) {
+    appendRemainingRequired(box, r.remainingRequired, r.requiredTotal);
+  }
 
   const c = r.closest;
   if (!c) return;
@@ -761,9 +989,19 @@ function renderPathQueryResult() {
   const desc = document.createElement('span');
   desc.textContent = c.isTargetScene
     ? `：目标场景「${c.sceneId}」第 ${c.depth} 步的到达状态`
-    : `：目标场景「${r.targetScene}」不可达；全剧情中最接近约束的是场景「${c.sceneId}」（第 ${c.depth} 步）`;
+    : `：目标场景「${r.targetScene}」不可达；全剧情中最接近条件的是场景「${c.sceneId}」（第 ${c.depth} 步）`;
   head.append(lead, desc);
   box.appendChild(head);
+
+  if (r.requiredTotal) {
+    const prog = document.createElement('div');
+    prog.className = 'pq-note';
+    prog.textContent = `该状态已按顺序经过 ${c.completedRequired}/${r.requiredTotal} 条必经选项。`;
+    box.appendChild(prog);
+  }
+  if (c.remainingRequired && c.remainingRequired.length) {
+    appendRemainingRequired(box, c.remainingRequired, r.requiredTotal);
+  }
 
   if (c.missing && c.missing.length) {
     const miss = document.createElement('div');
@@ -1197,6 +1435,28 @@ function bindGlobalEvents() {
     const firstVar = state.story.variables[0];
     state.pathQuery.constraints.push({ variable: firstVar ? firstVar.name : '', value: true });
     renderPqConstraints();
+    markPathQueryStale();
+  });
+  $('btnPqAddRequired').addEventListener('click', () => {
+    const uid = $('pqRequiredPick').value;
+    if (!uid) return toast('请先在下拉框中选择一条选项');
+    if (state.pathQuery.requiredUids.includes(uid) || state.pathQuery.forbiddenUids.includes(uid)) {
+      return toast('该选项已在必经或禁用名单中');
+    }
+    state.pathQuery.requiredUids.push(uid);
+    $('pqRequiredPick').value = '';
+    renderPqWaypoints();
+    markPathQueryStale();
+  });
+  $('btnPqAddForbidden').addEventListener('click', () => {
+    const uid = $('pqForbiddenPick').value;
+    if (!uid) return toast('请先在下拉框中选择一条选项');
+    if (state.pathQuery.requiredUids.includes(uid) || state.pathQuery.forbiddenUids.includes(uid)) {
+      return toast('该选项已在必经或禁用名单中');
+    }
+    state.pathQuery.forbiddenUids.push(uid);
+    $('pqForbiddenPick').value = '';
+    renderPqWaypoints();
     markPathQueryStale();
   });
   $('pqTarget').addEventListener('change', (e) => {

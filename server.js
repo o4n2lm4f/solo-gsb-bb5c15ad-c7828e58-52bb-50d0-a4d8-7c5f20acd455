@@ -56,7 +56,9 @@ app.get('/api/stories/:id/analysis', wrap((req, res) => {
 }));
 
 // ---- 目标路径查询：对请求体中的草稿剧情直接查询（不落盘），供编辑页查询面板实时使用 ----
-// 请求体：{ story: <剧情>, query: { targetScene, constraints: [{ variable, value }] } }
+// 请求体：{ story: <剧情>, query: { targetScene, constraints, requiredOptionUids, forbiddenOptionUids } }
+//   requiredOptionUids：有序必经选项 UID 数组（路径必须依次经过）
+//   forbiddenOptionUids：禁用选项 UID 数组（BFS 不扩展这些选项）
 app.post('/api/pathquery', wrap((req, res) => {
   const body = req.body || {};
   const story = body.story !== undefined ? body.story : body;
