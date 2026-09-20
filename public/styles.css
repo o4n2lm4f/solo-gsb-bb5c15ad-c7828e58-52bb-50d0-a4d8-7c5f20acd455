@@ -220,6 +220,30 @@ code {
 .pq-missing-label { font-size: 12px; color: var(--muted); }
 .pq-missing-chip { background: var(--danger-bg); color: var(--danger); }
 
+/* 必经 / 禁用选项行 */
+.pq-opt-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.pq-opt-row { display: flex; gap: 5px; align-items: center; }
+.pq-opt-row select { flex: 1; }
+.pq-order {
+  flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--primary); color: #fff; font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.pq-order-btn, .pq-opt-del {
+  border: none; background: none; cursor: pointer; font-size: 13px;
+  color: var(--muted); padding: 0 2px;
+}
+.pq-order-btn:hover:not(:disabled) { color: var(--primary); }
+.pq-order-btn:disabled { opacity: .35; cursor: default; }
+.pq-opt-del { color: var(--danger); }
+
+/* 路径中完成必经项的边 */
+.path-edge.is-required {
+  color: var(--text); border-left-color: var(--primary);
+  background: var(--info-bg); border-radius: 0 6px 6px 0; padding-top: 5px; padding-bottom: 5px;
+}
+.badge-req { background: var(--primary); color: #fff; margin-right: 2px; }
+
 /* 分析基线工具栏 */
 .baseline-bar {
   display: flex; align-items: center; gap: 10px;

@@ -56,7 +56,16 @@ app.get('/api/stories/:id/analysis', wrap((req, res) => {
 }));
 
 // ---- 目标路径查询：对请求体中的草稿剧情直接查询（不落盘），供编辑页查询面板实时使用 ----
-// 请求体：{ story: <剧情>, query: { targetScene, constraints: [{ variable, value }] } }
+// 请求体：{
+//   story: <剧情>,
+//   query: {
+//     targetScene,
+//     constraints: [{ variable, value }],
+//     requiredOptions: [uid, ...],  // 有序必经选项（按数组顺序依次经过）
+//     disabledOptions: [uid, ...],  // 禁用选项（传播时不扩展，且不得与必经项冲突）
+//   },
+// }
+// 校验失败（UID 不存在 / 必经与禁用冲突 / 约束重复等）返回 400
 app.post('/api/pathquery', wrap((req, res) => {
   const body = req.body || {};
   const story = body.story !== undefined ? body.story : body;

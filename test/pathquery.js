@@ -163,6 +163,136 @@ ok('空变量约束行被忽略', queryPath(story1, { targetScene: 'c', constrai
 ok('字符串 "false" 约束值按 false 处理',
   queryPath(story1, { targetScene: 'c', constraints: [{ variable: 'k', value: 'false' }] }).depth === 1);
 
+// ---------- 有序必经选项 + 禁用选项 ----------
+console.log('有序必经 / 禁用选项：');
+// s ->(oa) a ->(ob) b ->(oc) t；直走 oc 之前必须先依次经过 oa、ob
+const storyReq = {
+  startScene: 's',
+  variables: [],
+  scenes: [
+    {
+      id: 's', options: [
+        { uid: 'oa', text: '去 a', target: 'a' },
+        { uid: 'ob', text: '直接去 b', target: 'b' },
+      ],
+    },
+    { id: 'a', options: [{ uid: 'oc', text: '去 b', target: 'b' }] },
+    { id: 'b', options: [{ uid: 'od', text: '到 t', target: 't' }] },
+    { id: 't', options: [] },
+  ],
+};
+
+// 必须依次经过 oa（s->a）、oc（a->b）、od（b->t）
+const rq1 = queryPath(storyReq, { targetScene: 't', requiredOptions: ['oa', 'oc', 'od'] });
+ok('依次经过全部必经项才命中', rq1.found === true);
+ok('命中路径为 s -> a -> b -> t（3 步）',
+  rq1.depth === 3 &&
+  rq1.path.filter((n) => n.kind === 'scene').map((n) => n.sceneId).join(',') === 's,a,b,t');
+ok('命中结果带 completedRequiredCount 且未完成项为空',
+  rq1.completedRequiredCount === 3 && rq1.unfinishedRequiredOptions.length === 0);
+ok('完成必经项的边带 1-based 序号',
+  rq1.path.filter((n) => n.kind === 'option' && n.required)
+    .map((n) => n.requiredOrder).join(',') === '1,2,3');
+
+// 必经次序无法满足：od（b->t）进入终局场景 t（无出边），其后要求的 oc（a->b）永无可能完成
+const rq2 = queryPath(storyReq, { targetScene: 't', requiredOptions: ['oa', 'od', 'oc'] });
+ok('必经次序无法满足时无解（完整穷举）', rq2.found === false && rq2.canAssertUnsolvable === true);
+ok('无解结果列出未完成必经项',
+  rq2.unfinishedRequiredOptions.length === 1 &&
+  rq2.unfinishedRequiredOptions[0].uid === 'oc' && rq2.unfinishedRequiredOptions[0].order === 3);
+ok('差异最少状态在目标场景上且已完成前 2 个必经项',
+  rq2.closest && rq2.closest.isTargetScene === true && rq2.closest.completedRequiredCount === 2);
+ok('差异最少状态带未完成必经项明细',
+  rq2.closest.unfinishedRequiredOptions.map((x) => x.uid).join(',') === 'oc');
+
+// 乱序经过不计入进度：要求先 oc 后 oa —— 唯一到 a 的边是 oa，oa 先于 oc，
+// 之后再没有 oa 可走（a/b/t 均无回到 s 的边），故无解
+const rq2b = queryPath(storyReq, { targetScene: 't', requiredOptions: ['oc', 'oa'] });
+ok('乱序 / 提前经过不计入必经进度', rq2b.found === false && rq2b.canAssertUnsolvable === true);
+
+// 禁用直走边 ob：仍可由 oa,oc 到达 t
+const rq3 = queryPath(storyReq, { targetScene: 't', disabledOptions: ['ob'] });
+ok('禁用项不扩展（其余路径仍可达）', rq3.found === true && rq3.depth === 3);
+ok('结果回显禁用项明细', rq3.disabledCount === 1 && rq3.disabledOptions[0].uid === 'ob');
+
+// 禁用必经唯一通路 oa：无法完成必经项
+const rq4 = queryPath(storyReq, { targetScene: 't', requiredOptions: ['oa', 'od'], disabledOptions: ['ob'] });
+ok('禁用后仍可经 oa -> oc 完成必经', rq4.found === true && rq4.depth === 3);
+
+// 必经选项被禁用 => 400
+ok('必经与禁用冲突 => 400', throws400(
+  () => queryPath(storyReq, { targetScene: 't', requiredOptions: ['oa'], disabledOptions: ['oa'] }),
+  /同时/));
+
+// UID 不存在 => 400
+ok('必经 UID 不存在 => 400', throws400(
+  () => queryPath(storyReq, { targetScene: 't', requiredOptions: ['ghost'] }), /不存在/));
+ok('禁用 UID 不存在 => 400', throws400(
+  () => queryPath(storyReq, { targetScene: 't', disabledOptions: ['ghost'] }), /不存在/));
+
+// 重复必经 / 重复禁用 => 400；空字符串行被忽略
+ok('重复必经 UID => 400', throws400(
+  () => queryPath(storyReq, { targetScene: 't', requiredOptions: ['oa', 'oa'] }), /重复/));
+ok('重复禁用 UID => 400', throws400(
+  () => queryPath(storyReq, { targetScene: 't', disabledOptions: ['ob', 'ob'] }), /重复/));
+const rq5 = queryPath(storyReq, { targetScene: 't', requiredOptions: ['', 'oa'] });
+ok('必经列表中的空行被忽略', rq5.found === true && rq5.requiredCount === 1);
+ok('非数组列表 => 400', throws400(
+  () => queryPath(storyReq, { targetScene: 't', requiredOptions: 'oa' }), /数组/));
+
+// 必经 + 变量约束同时生效：必须绕路拿到钥匙
+const storyReqK = {
+  startScene: 'a',
+  variables: ['k'],
+  scenes: [
+    {
+      id: 'a', options: [
+        { uid: 'p1', text: '直接走', target: 'c' },
+        { uid: 'p2', text: '先拿钥匙', target: 'b', assigns: [{ variable: 'k', value: true }] },
+      ],
+    },
+    { id: 'b', options: [{ uid: 'p3', text: '前进', target: 'c' }] },
+    { id: 'c', options: [] },
+  ],
+};
+const rq6 = queryPath(storyReqK, {
+  targetScene: 'c',
+  constraints: [{ variable: 'k', value: true }],
+  requiredOptions: ['p2', 'p3'],
+});
+ok('必经顺序与变量约束同时满足才命中（绕路 2 步）', rq6.found === true && rq6.depth === 2);
+ok('未完成项与约束差异共同计入 closest 差异数', (() => {
+  const r = queryPath(storyReqK, {
+    targetScene: 'c',
+    constraints: [{ variable: 'k', value: true }],
+    requiredOptions: ['p2', 'p3'],
+    disabledOptions: ['p1'],
+  });
+  return r.found === true;
+})());
+
+// 环路剧情：必须先在 s1 循环拿 x（经过 loop 选项），再继续
+const loopReq = {
+  startScene: 's1',
+  variables: ['x'],
+  scenes: [
+    {
+      id: 's1', options: [
+        { uid: 'loop', text: '循环', condition: '!x', target: 's1', assigns: [{ variable: 'x', value: true }] },
+        { uid: 'go', text: '继续', condition: 'x', target: 's2' },
+      ],
+    },
+    { id: 's2', options: [{ uid: 'back', text: '回去', target: 's1', assigns: [{ variable: 'x', value: false }] }] },
+  ],
+};
+const rq7 = queryPath(loopReq, { targetScene: 's2', requiredOptions: ['loop', 'go'] });
+ok('含循环剧情按必经顺序命中（进度纳入去重键）', rq7.found === true && rq7.depth === 2);
+ok('循环路径上边序号正确', rq7.path.filter((n) => n.kind === 'option').map((n) => n.requiredOrder || 0).join(',') === '1,2');
+
+// 禁用循环选项后，go 的条件 x 永不成立 => 无解
+const rq8 = queryPath(loopReq, { targetScene: 's2', disabledOptions: ['loop'] });
+ok('禁用唯一赋值选项后可断言无解', rq8.found === false && rq8.canAssertUnsolvable === true);
+
 // ---------- 条件语法错误容错 ----------
 const badCondStory = {
   startScene: 'a',
@@ -239,6 +369,32 @@ ok('示例：可断言无解（状态空间完整穷举）', rd2.canAssertUnsolv
       targetScene: 'c', constraints: [{ variable: 'k', value: true }, { variable: 'k', value: false }],
     });
     ok('重复约束返回 400', q5.status === 400);
+
+    // 必经 / 禁用选项校验与查询
+    const q6 = await post('/api/pathquery', {
+      story: storyReq,
+      query: { targetScene: 't', requiredOptions: ['oa', 'oc', 'od'] },
+    });
+    ok('POST /api/pathquery 支持有序必经选项', q6.status === 200 && q6.body.found === true && q6.body.depth === 3);
+
+    const q7 = await post('/api/pathquery', {
+      story: storyReq,
+      query: { targetScene: 't', requiredOptions: ['oa'], disabledOptions: ['oa'] },
+    });
+    ok('必经与禁用冲突返回 400', q7.status === 400 && /同时/.test(q7.body.error || ''));
+
+    const q8 = await post('/api/pathquery', {
+      story: storyReq,
+      query: { targetScene: 't', requiredOptions: ['no-such-uid'] },
+    });
+    ok('必经 UID 不存在返回 400', q8.status === 400 && /不存在/.test(q8.body.error || ''));
+
+    const q9 = await post('/api/pathquery', {
+      story: storyReq,
+      query: { targetScene: 't', disabledOptions: ['ob'] },
+    });
+    ok('禁用项经 API 生效', q9.status === 200 && q9.body.found === true &&
+      q9.body.disabledOptions.length === 1);
   } finally {
     server.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });

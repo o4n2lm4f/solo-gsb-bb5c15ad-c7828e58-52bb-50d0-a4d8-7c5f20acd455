@@ -140,6 +140,16 @@
           <div id="pqConstraints" class="assign-list"></div>
           <button id="btnPqAddConstraint" class="btn btn-small">＋ 添加约束</button>
         </div>
+        <div class="field">
+          <span>有序必经选项（按顺序依次经过；用 ↑↓ 调整次序）</span>
+          <div id="pqRequired" class="pq-opt-list"></div>
+          <button id="btnPqAddRequired" class="btn btn-small">＋ 添加必经选项</button>
+        </div>
+        <div class="field">
+          <span>禁用选项（查询时这些选项不可走，且不能与必经项重复）</span>
+          <div id="pqDisabled" class="pq-opt-list"></div>
+          <button id="btnPqAddDisabled" class="btn btn-small">＋ 添加禁用选项</button>
+        </div>
         <div id="pqStale" class="diff-stale" hidden>⚠ 剧情或查询条件已修改，以下结果可能过期，请重新「查询路径」</div>
         <div id="pqResult" class="pq-result"></div>
       </section>
